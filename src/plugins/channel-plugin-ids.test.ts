@@ -26,7 +26,15 @@ function createManifestRegistryFixture() {
         cliBackends: [],
       },
       {
-        id: "demo-default-on-sidecar",
+        id: "demo-other-channel",
+        channels: ["demo-other-channel"],
+        origin: "bundled",
+        enabledByDefault: undefined,
+        providers: [],
+        cliBackends: [],
+      },
+      {
+        id: "browser",
         channels: [],
         origin: "bundled",
         enabledByDefault: true,
@@ -42,7 +50,25 @@ function createManifestRegistryFixture() {
         cliBackends: ["demo-cli"],
       },
       {
-        id: "demo-bundled-sidecar",
+        id: "memory-core",
+        kind: "memory",
+        channels: [],
+        origin: "bundled",
+        enabledByDefault: undefined,
+        providers: [],
+        cliBackends: [],
+      },
+      {
+        id: "memory-lancedb",
+        kind: "memory",
+        channels: [],
+        origin: "bundled",
+        enabledByDefault: undefined,
+        providers: [],
+        cliBackends: [],
+      },
+      {
+        id: "voice-call",
         channels: [],
         origin: "bundled",
         enabledByDefault: undefined,
@@ -62,39 +88,68 @@ function createManifestRegistryFixture() {
   };
 }
 
-function expectStartupPluginIds(config: OpenClawConfig, expected: readonly string[]) {
+function expectStartupPluginIds(params: {
+  config: OpenClawConfig;
+  activationSourceConfig?: OpenClawConfig;
+  expected: readonly string[];
+}) {
   expect(
     resolveGatewayStartupPluginIds({
-      config,
+      config: params.config,
+      ...(params.activationSourceConfig !== undefined
+        ? { activationSourceConfig: params.activationSourceConfig }
+        : {}),
       workspaceDir: "/tmp",
       env: process.env,
     }),
-  ).toEqual(expected);
+  ).toEqual(params.expected);
   expect(loadPluginManifestRegistry).toHaveBeenCalled();
 }
 
 function expectStartupPluginIdsCase(params: {
   config: OpenClawConfig;
+  activationSourceConfig?: OpenClawConfig;
   expected: readonly string[];
 }) {
-  expectStartupPluginIds(params.config, params.expected);
+  expectStartupPluginIds(params);
 }
 
 function createStartupConfig(params: {
   enabledPluginIds?: string[];
   providerIds?: string[];
   modelId?: string;
+  channelIds?: string[];
+  allowPluginIds?: string[];
+  noConfiguredChannels?: boolean;
 }) {
   return {
+    ...(params.noConfiguredChannels
+      ? {
+          channels: {},
+        }
+      : params.channelIds?.length
+        ? {
+            channels: Object.fromEntries(
+              params.channelIds.map((channelId) => [channelId, { enabled: true }]),
+            ),
+          }
+        : {}),
     ...(params.enabledPluginIds?.length
       ? {
           plugins: {
+            ...(params.allowPluginIds?.length ? { allow: params.allowPluginIds } : {}),
             entries: Object.fromEntries(
               params.enabledPluginIds.map((pluginId) => [pluginId, { enabled: true }]),
             ),
           },
         }
-      : {}),
+      : params.allowPluginIds?.length
+        ? {
+            plugins: {
+              allow: params.allowPluginIds,
+            },
+          }
+        : {}),
     ...(params.providerIds?.length
       ? {
           models: {
@@ -127,32 +182,153 @@ function createStartupConfig(params: {
 
 describe("resolveGatewayStartupPluginIds", () => {
   beforeEach(() => {
-    listPotentialConfiguredChannelIds.mockReset().mockReturnValue(["demo-channel"]);
+    listPotentialConfiguredChannelIds.mockReset().mockImplementation((config: OpenClawConfig) => {
+      if (Object.prototype.hasOwnProperty.call(config, "channels")) {
+        return Object.keys(config.channels ?? {});
+      }
+      return ["demo-channel"];
+    });
     loadPluginManifestRegistry.mockReset().mockReturnValue(createManifestRegistryFixture());
   });
 
   it.each([
     [
-      "includes configured channels, explicit bundled sidecars, and enabled non-bundled sidecars",
+      "includes only configured channel plugins at idle startup",
       createStartupConfig({
-        enabledPluginIds: ["demo-bundled-sidecar"],
+        enabledPluginIds: ["voice-call"],
         modelId: "demo-cli/demo-model",
       }),
-      ["demo-channel", "demo-provider-plugin", "demo-bundled-sidecar", "demo-global-sidecar"],
+      ["demo-channel", "browser", "voice-call"],
     ],
     [
-      "does not pull default-on bundled non-channel plugins into startup",
+      "keeps bundled startup sidecars with enabledByDefault at idle startup",
       {} as OpenClawConfig,
-      ["demo-channel", "demo-global-sidecar"],
+      ["demo-channel", "browser"],
     ],
     [
-      "auto-loads bundled plugins referenced by configured provider ids",
+      "keeps provider plugins out of idle startup when only provider config references them",
       createStartupConfig({
         providerIds: ["demo-provider"],
       }),
-      ["demo-channel", "demo-provider-plugin", "demo-global-sidecar"],
+      ["demo-channel", "browser"],
+    ],
+    [
+      "includes explicitly enabled non-channel sidecars in startup scope",
+      createStartupConfig({
+        enabledPluginIds: ["demo-global-sidecar", "voice-call"],
+      }),
+      ["demo-channel", "browser", "voice-call", "demo-global-sidecar"],
+    ],
+    [
+      "keeps default-enabled startup sidecars when a restrictive allowlist permits them",
+      createStartupConfig({
+        allowPluginIds: ["browser"],
+        noConfiguredChannels: true,
+      }),
+      ["browser"],
+    ],
+    [
+      "includes every configured channel plugin and excludes other channels",
+      createStartupConfig({
+        channelIds: ["demo-channel", "demo-other-channel"],
+      }),
+      ["demo-channel", "demo-other-channel", "browser"],
     ],
   ] as const)("%s", (_name, config, expected) => {
     expectStartupPluginIdsCase({ config, expected });
+  });
+
+  it("keeps effective-only bundled sidecars behind restrictive allowlists", () => {
+    const rawConfig = createStartupConfig({
+      allowPluginIds: ["browser"],
+    });
+    const effectiveConfig = {
+      ...rawConfig,
+      plugins: {
+        allow: ["browser"],
+        entries: {
+          "voice-call": {
+            enabled: true,
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    expectStartupPluginIdsCase({
+      config: effectiveConfig,
+      activationSourceConfig: rawConfig,
+      expected: ["demo-channel", "browser"],
+    });
+  });
+
+  it("includes memory-core at startup when dreaming is enabled", () => {
+    expectStartupPluginIdsCase({
+      config: {
+        channels: {},
+        plugins: {
+          entries: {
+            "memory-core": {
+              enabled: true,
+              config: {
+                dreaming: {
+                  enabled: true,
+                },
+              },
+            },
+          },
+        },
+      } as OpenClawConfig,
+      expected: ["browser", "memory-core"],
+    });
+  });
+
+  it("includes the selected memory-slot plugin and memory-core when dreaming is enabled", () => {
+    expectStartupPluginIdsCase({
+      config: {
+        plugins: {
+          slots: {
+            memory: "memory-lancedb",
+          },
+          entries: {
+            "memory-core": {
+              enabled: true,
+            },
+            "memory-lancedb": {
+              enabled: true,
+              config: {
+                dreaming: {
+                  enabled: true,
+                },
+              },
+            },
+          },
+        },
+      } as OpenClawConfig,
+      expected: ["demo-channel", "browser", "memory-core", "memory-lancedb"],
+    });
+  });
+
+  it("does not bypass activation policy for dreaming startup owners", () => {
+    expectStartupPluginIdsCase({
+      config: {
+        channels: {},
+        plugins: {
+          slots: {
+            memory: "memory-lancedb",
+          },
+          entries: {
+            "memory-lancedb": {
+              enabled: false,
+              config: {
+                dreaming: {
+                  enabled: true,
+                },
+              },
+            },
+          },
+        },
+      } as OpenClawConfig,
+      expected: ["browser"],
+    });
   });
 });

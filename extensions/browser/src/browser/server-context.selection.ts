@@ -1,4 +1,9 @@
-import { fetchOk, normalizeCdpHttpBaseForJsonEndpoints } from "./cdp.helpers.js";
+import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
+import {
+  assertCdpEndpointAllowed,
+  fetchOk,
+  normalizeCdpHttpBaseForJsonEndpoints,
+} from "./cdp.helpers.js";
 import { appendCdpPath } from "./cdp.js";
 import { closeChromeMcpTab, focusChromeMcpTab } from "./chrome-mcp.js";
 import type { ResolvedBrowserProfile } from "./config.js";
@@ -6,11 +11,16 @@ import { BrowserTabNotFoundError, BrowserTargetAmbiguousError } from "./errors.j
 import { getBrowserProfileCapabilities } from "./profile-capabilities.js";
 import type { PwAiModule } from "./pw-ai-module.js";
 import { getPwAiModule } from "./pw-ai-module.js";
-import type { BrowserTab, ProfileRuntimeState } from "./server-context.types.js";
+import type {
+  BrowserServerState,
+  BrowserTab,
+  ProfileRuntimeState,
+} from "./server-context.types.js";
 import { resolveTargetIdFromTabs } from "./target-id.js";
 
 type SelectionDeps = {
   profile: ResolvedBrowserProfile;
+  state: () => BrowserServerState;
   getProfileState: () => ProfileRuntimeState;
   ensureBrowserAvailable: () => Promise<void>;
   listTabs: () => Promise<BrowserTab[]>;
@@ -25,6 +35,7 @@ type SelectionOps = {
 
 export function createProfileSelectionOps({
   profile,
+  state,
   getProfileState,
   ensureBrowserAvailable,
   listTabs,
@@ -32,9 +43,19 @@ export function createProfileSelectionOps({
 }: SelectionDeps): SelectionOps {
   const cdpHttpBase = normalizeCdpHttpBaseForJsonEndpoints(profile.cdpUrl);
   const capabilities = getBrowserProfileCapabilities(profile);
+  const assertProfileCdpEndpointAllowed = async (): Promise<void> => {
+    await assertCdpEndpointAllowed(profile.cdpUrl, state().resolved.ssrfPolicy);
+  };
+  const assertSelectableCdpEndpointAllowed = async (): Promise<void> => {
+    if (capabilities.usesChromeMcp || !profile.cdpUrl) {
+      return;
+    }
+    await assertProfileCdpEndpointAllowed();
+  };
 
   const ensureTabAvailable = async (targetId?: string): Promise<BrowserTab> => {
     await ensureBrowserAvailable();
+    await assertSelectableCdpEndpointAllowed();
     const profileState = getProfileState();
     const tabs1 = await listTabs();
     if (tabs1.length === 0) {
@@ -56,7 +77,7 @@ export function createProfileSelectionOps({
     };
 
     const pickDefault = () => {
-      const last = profileState.lastTargetId?.trim() || "";
+      const last = normalizeOptionalString(profileState.lastTargetId) ?? "";
       const lastResolved = last ? resolveById(last) : null;
       if (lastResolved && lastResolved !== "AMBIGUOUS") {
         return lastResolved;
@@ -79,6 +100,7 @@ export function createProfileSelectionOps({
   };
 
   const resolveTargetIdOrThrow = async (targetId: string): Promise<string> => {
+    await assertSelectableCdpEndpointAllowed();
     const tabs = await listTabs();
     const resolved = resolveTargetIdFromTabs(targetId, tabs);
     if (!resolved.ok) {
@@ -105,9 +127,11 @@ export function createProfileSelectionOps({
       const focusPageByTargetIdViaPlaywright = (mod as Partial<PwAiModule> | null)
         ?.focusPageByTargetIdViaPlaywright;
       if (typeof focusPageByTargetIdViaPlaywright === "function") {
+        // SSRF check runs inside connectBrowser on cache miss.
         await focusPageByTargetIdViaPlaywright({
           cdpUrl: profile.cdpUrl,
           targetId: resolvedTargetId,
+          ssrfPolicy: state().resolved.ssrfPolicy,
         });
         const profileState = getProfileState();
         profileState.lastTargetId = resolvedTargetId;
@@ -115,6 +139,7 @@ export function createProfileSelectionOps({
       }
     }
 
+    await assertProfileCdpEndpointAllowed();
     await fetchOk(appendCdpPath(cdpHttpBase, `/json/activate/${resolvedTargetId}`));
     const profileState = getProfileState();
     profileState.lastTargetId = resolvedTargetId;
@@ -134,14 +159,17 @@ export function createProfileSelectionOps({
       const closePageByTargetIdViaPlaywright = (mod as Partial<PwAiModule> | null)
         ?.closePageByTargetIdViaPlaywright;
       if (typeof closePageByTargetIdViaPlaywright === "function") {
+        // SSRF check runs inside connectBrowser on cache miss.
         await closePageByTargetIdViaPlaywright({
           cdpUrl: profile.cdpUrl,
           targetId: resolvedTargetId,
+          ssrfPolicy: state().resolved.ssrfPolicy,
         });
         return;
       }
     }
 
+    await assertProfileCdpEndpointAllowed();
     await fetchOk(appendCdpPath(cdpHttpBase, `/json/close/${resolvedTargetId}`));
   };
 
