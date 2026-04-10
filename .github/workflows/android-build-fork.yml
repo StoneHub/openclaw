@@ -13,6 +13,18 @@ jobs:
   android-debug-apk:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: play
+            gradle_task: :app:assemblePlayDebug
+            artifact_name: openclaw-android-play-debug-apk
+            artifact_path: apps/android/app/build/outputs/apk/play/debug/*.apk
+          - flavor: thirdparty
+            gradle_task: :app:assembleThirdPartyDebug
+            artifact_name: openclaw-android-thirdparty-debug-apk
+            artifact_path: apps/android/app/build/outputs/apk/thirdParty/debug/*.apk
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,13 +59,13 @@ jobs:
             "platforms;android-36" \
             "build-tools;36.0.0"
 
-      - name: Build debug APK
+      - name: Build ${{ matrix.flavor }} debug APK
         working-directory: apps/android
-        run: ./gradlew --no-daemon :app:assemblePlayDebug
+        run: ./gradlew --no-daemon ${{ matrix.gradle_task }}
 
-      - name: Upload APK
+      - name: Upload ${{ matrix.flavor }} APK
         uses: actions/upload-artifact@v4
         with:
-          name: openclaw-android-play-debug-apk
-          path: apps/android/app/build/outputs/apk/play/debug/*.apk
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
           if-no-files-found: error
